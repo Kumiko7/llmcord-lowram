@@ -261,6 +261,7 @@ async def on_message(new_msg: discord.Message) -> None:
             now = datetime.now().astimezone()
 
             system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
+            system_prompt = system_prompt.replace("{userid}", str(new_msg.author.id))
             if accept_usernames:
                 system_prompt += "\nUser's names are their Discord IDs and should be typed as '<@ID>'."
 
