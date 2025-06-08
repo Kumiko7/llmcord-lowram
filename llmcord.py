@@ -1,7 +1,7 @@
 import asyncio
 from base64 import b64encode
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone 
 import logging
 from typing import Any, Literal, Optional
 
@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 import yaml
 import platform
 import urllib.parse
+from zoneinfo import ZoneInfo;
 
 logging.basicConfig(
     level=logging.INFO,
@@ -262,6 +263,9 @@ async def on_message(new_msg: discord.Message) -> None:
 
             system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
             system_prompt = system_prompt.replace("{userid}", str(new_msg.author.id))
+            now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Tokyo'))
+            system_prompt = system_prompt.replace("{date_jst}", now_jst.strftime("%B %d %Y")).replace("{time_jst}", now_jst.strftime("%H:%M:%S %Z%z"))
+            
             if accept_usernames:
                 system_prompt += "\nUser's names are their Discord IDs and should be typed as '<@ID>'."
 
