@@ -20,20 +20,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s: %(message)s",
 )
 
-def set_memory_limit(max_bytes):
-    if platform.system() != "Windows":
-        try:
-            import resource
-            soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-            resource.setrlimit(resource.RLIMIT_DATA, (max_bytes, hard))
-            logging.info(f"Memory limit set to {max_bytes / (1024*1024):.2f} MB")
-        except ValueError as e:
-            logging.info(f"Failed to set memory limit: {e}")
-        except Exception as e:
-            logging.info(f"An unexpected error occurred while setting memory limit: {e}")
-    else:
-        logging.info("The 'resource' module is not available on Windows for memory limits.")
-        
 MEMORY_LIMIT_MB = 95
 
 VISION_MODEL_TAGS = ("gpt-4", "o3", "o4", "claude", "gemini", "gemma", "llama", "pixtral", "mistral", "vision", "vl")
@@ -48,6 +34,19 @@ EDIT_DELAY_SECONDS = 1
 MAX_MESSAGE_NODES = 30
 
 
+def set_memory_limit(max_bytes):
+    if platform.system() != "Windows":
+        try:
+            import resource
+            soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+            resource.setrlimit(resource.RLIMIT_DATA, (max_bytes, hard))
+            logging.info(f"Memory limit set to {max_bytes / (1024*1024):.2f} MB")
+        except ValueError as e:
+            logging.info(f"Failed to set memory limit: {e}")
+        except Exception as e:
+            logging.info(f"An unexpected error occurred while setting memory limit: {e}")
+    else:
+        logging.info("The 'resource' module is not available on Windows for memory limits.")
 set_memory_limit(MEMORY_LIMIT_MB * 1024 * 1024) # Convert MB to bytes
 
 def get_config(filename: str = "config.yaml") -> dict[str, Any]:
