@@ -1,4 +1,4 @@
-Fork of [llmcord](https://github.com/jakobdylanc/llmcord) to support low RAM environments, such as [Discloud](https://discloud.com/) free hosting. Caps RAM usage and supports using (Cloudinary)[https://cloudinary.com/] to downscale images to conserve RAM.
+Fork of [llmcord](https://github.com/jakobdylanc/llmcord) to support low RAM environments, such as [Discloud](https://discloud.com/) free hosting. Caps RAM usage and supports using [Cloudinary](https://cloudinary.com/) to downscale images to conserve RAM.
 
 <h1 align="center">
   llmcord
