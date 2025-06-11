@@ -186,10 +186,12 @@ async def on_message(new_msg: discord.Message) -> None:
                     good_attachments = [att for att in curr_msg.attachments if att.content_type and any(att.content_type.startswith(x) for x in ("text", "image"))]
                     if "cloudinary_name" in config and config['cloudinary_name'] is not None:
                         for att in good_attachments:
-                            if att.content_type.startswith("image"):
-                                att.url = f"https://res.cloudinary.com/{config['cloudinary_name']}/image/fetch/c_limit,h_512,w_512/{urllib.parse.quote_plus(att.url)}"
+                            parsedurl = urllib.parse.quote_plus(att.url)
+                            if att.content_type.startswith("image") and len(parsedurl) <= 255:
+                                att.url = f"https://res.cloudinary.com/{config['cloudinary_name']}/image/fetch/c_limit,h_512,w_512/{parsedurl}"
 
                     attachment_responses = await asyncio.gather(*[httpx_client.get(att.url) for att in good_attachments])
+                    attachment_responses  = [res for res in attachment_responses if not res.is_error]
 
                     curr_node.text = "\n".join(
                         ([cleaned_content] if cleaned_content else [])
