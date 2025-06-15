@@ -20,7 +20,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s: %(message)s",
 )
 
-MEMORY_LIMIT_MB = 95
+MEMORY_LIMIT_MB = 99
 
 VISION_MODEL_TAGS = ("gpt-4", "o3", "o4", "claude", "gemini", "gemma", "llama", "pixtral", "mistral", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
@@ -356,8 +356,14 @@ async def on_message(new_msg: discord.Message) -> None:
         try:
             async with new_msg.channel.typing():
                 msg_nodes.clear()
-                content = f"⚠️ Error Generating Message: {e.__class__.__name__}"
+                errorname = e.__class__.__name__
+                content = f"⚠️ Error Generating Message: {errorname}"
                 response_msg = await new_msg.reply(content=content, suppress_embeds=True)
+                if errorname == "MemoryError":
+                    import os
+                    import sys
+                    python = sys.executable
+                    os.execv(python, [python] + sys.argv)
         except Exception:
             logging.exception("Nested Error while generating exception warning")
 
