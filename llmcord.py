@@ -14,13 +14,14 @@ import yaml
 import platform
 import urllib.parse
 from zoneinfo import ZoneInfo;
+import schedule
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s",
 )
 
-MEMORY_LIMIT_MB = 99
+MEMORY_LIMIT_MB = 100
 
 VISION_MODEL_TAGS = ("gpt-4", "o3", "o4", "claude", "gemini", "gemma", "llama", "pixtral", "mistral", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
@@ -31,7 +32,7 @@ EMBED_COLOR_INCOMPLETE = discord.Color.orange()
 STREAMING_INDICATOR = " ⚪"
 EDIT_DELAY_SECONDS = 1
 
-MAX_MESSAGE_NODES = 30
+MAX_MESSAGE_NODES = 50
 
 
 def set_memory_limit(max_bytes):
@@ -68,6 +69,7 @@ discord_bot = commands.Bot(intents=intents, activity=activity, command_prefix=No
 httpx_client = httpx.AsyncClient()
 
 
+
 @dataclass
 class MsgNode:
     text: Optional[str] = None
@@ -84,6 +86,54 @@ class MsgNode:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+async def restart_discloud_app():
+    try:
+        DISCLOUD_API_BASE_URL = "https://api.discloud.app/v2"
+        DISCLOUD_API_TOKEN = config["discloud_token"]
+        DISCLOUD_APP_ID = config["discloud_app"]
+            
+        logging.info(f" Attempting to restart Discloud app: {DISCLOUD_APP_ID}...")
+
+        headers = {
+            "api-token": DISCLOUD_API_TOKEN
+        }
+
+        # Construct the API endpoint for restarting the application
+        restart_url = f"{DISCLOUD_API_BASE_URL}/app/{DISCLOUD_APP_ID}/restart"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(restart_url, headers=headers)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+        data = response.json()
+        logging.info(f"Successfully requested restart for app: {DISCLOUD_APP_ID}. API response: {data.get('message', 'No message provided')}")
+
+    except Exception as e:
+        logging.exception(f"An unhandled error occurred restarting Discloud")
+        
+async def check_discloud_ram():
+    try:
+        DISCLOUD_API_BASE_URL = "https://api.discloud.app/v2"
+        DISCLOUD_API_TOKEN = config["discloud_token"]
+        DISCLOUD_APP_ID = config["discloud_app"]
+        
+        headers = {
+            "api-token": DISCLOUD_API_TOKEN,
+            "Content-Type": "application/json"
+        }
+
+        status_url = f"{DISCLOUD_API_BASE_URL}/app/{DISCLOUD_APP_ID}/status"
+        response = await httpx_client.get(status_url, headers=headers)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+        data = response.json()["apps"]['memory']
+        logging.info(f"RAM: {data} for app {DISCLOUD_APP_ID}")
+        return float(data.split("MB/")[0])
+
+    except Exception as e:
+        logging.exception(f"An unhandled error occurred checking Discloud status")
+        return 0
+        
+        
 @discord_bot.tree.command(name="model", description="View or switch the current model")
 async def model_command(interaction: discord.Interaction, model: str) -> None:
     global curr_model
@@ -105,8 +155,8 @@ async def model_command(interaction: discord.Interaction, model: str) -> None:
 async def model_autocomplete(interaction: discord.Interaction, curr_str: str) -> list[Choice[str]]:
     global config
 
-    if curr_str == "":
-        config = await asyncio.to_thread(get_config)
+    #if curr_str == "":
+    #    config = await asyncio.to_thread(get_config)
 
     choices = [Choice(name=f"○ {model}", value=model) for model in config["models"] if model != curr_model and curr_str.lower() in model.lower()][:24]
     choices += [Choice(name=f"◉ {curr_model} (current)", value=curr_model)] if curr_str.lower() in curr_model.lower() else []
@@ -135,7 +185,7 @@ async def on_message(new_msg: discord.Message) -> None:
         role_ids = set(role.id for role in getattr(new_msg.author, "roles", ()))
         channel_ids = set(filter(None, (new_msg.channel.id, getattr(new_msg.channel, "parent_id", None), getattr(new_msg.channel, "category_id", None))))
 
-        config = await asyncio.to_thread(get_config)
+        # config = await asyncio.to_thread(get_config)
 
         permissions = config["permissions"]
 
@@ -184,7 +234,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     cleaned_content = curr_msg.content.removeprefix(discord_bot.user.mention).lstrip()
 
                     good_attachments = [att for att in curr_msg.attachments if att.content_type and any(att.content_type.startswith(x) for x in ("text", "image"))]
-                    if "cloudinary_name" in config and config['cloudinary_name'] is not None:
+                    if config.get("cloudinary_name"):
                         for att in good_attachments:
                             parsedurl = urllib.parse.quote_plus(att.url)
                             if att.content_type.startswith("image") and len(parsedurl) <= 255:
@@ -351,6 +401,10 @@ async def on_message(new_msg: discord.Message) -> None:
             for msg_id in sorted(msg_nodes.keys())[: num_nodes - MAX_MESSAGE_NODES]:
                 async with msg_nodes.setdefault(msg_id, MsgNode()).lock:
                     msg_nodes.pop(msg_id, None)
+                    
+        if (await check_discloud_ram()) > 86:
+            logging.info("RAM is getting high, restarting app")
+            await restart_discloud_app()
     except Exception as e:
         logging.exception("Error during message event")
         try:
@@ -359,16 +413,31 @@ async def on_message(new_msg: discord.Message) -> None:
                 errorname = e.__class__.__name__
                 content = f"⚠️ Error Generating Message: {errorname}"
                 response_msg = await new_msg.reply(content=content, suppress_embeds=True)
-                if errorname == "MemoryError":
-                    import os
-                    import sys
-                    python = sys.executable
-                    os.execv(python, [python] + sys.argv)
+                if isinstance(e, MemoryError):
+                    await restart_discloud_app()
         except Exception:
             logging.exception("Nested Error while generating exception warning")
 
+schedule.every(48).hours.do(lambda: asyncio.create_task(restart_discloud_app()))
+
+async def run_schedule_continuously():
+    if config.get("discloud_token"):
+        while True:
+            schedule.run_pending()
+            await asyncio.sleep(3600) 
+
+
 async def main() -> None:
-    await discord_bot.start(config["bot_token"])
+    try:
+        bot_task = asyncio.create_task(discord_bot.start(config["bot_token"]))
+        schedule_task = asyncio.create_task(run_schedule_continuously())
+        await asyncio.gather(bot_task, schedule_task)
+    except Exception as e:
+        logging.exception("Critical error during bot, restarting in 30 seconds")
+        await discord_bot.close()
+        await asyncio.sleep(30) 
+        await restart_discloud_app()
+    
 
 
 asyncio.run(main())
