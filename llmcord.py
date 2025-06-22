@@ -167,7 +167,7 @@ async def model_autocomplete(interaction: discord.Interaction, curr_str: str) ->
 @discord_bot.event
 async def on_ready() -> None:
     if client_id := config["client_id"]:
-        logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/api/oauth2/authorize?client_id={client_id}&permissions=412317273088&scope=bot\n")
+        logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317273088&scope=bot\n")
 
     await discord_bot.tree.sync()
 
@@ -339,11 +339,13 @@ async def on_message(new_msg: discord.Message) -> None:
                 async for curr_chunk in await openai_client.chat.completions.create(model=model, messages=messages[::-1], stream=True, extra_body=model_parameters):
                     if finish_reason != None:
                         break
+                    if not (choice := curr_chunk.choices[0] if curr_chunk.choices else None):
+                        continue
 
-                    finish_reason = curr_chunk.choices[0].finish_reason
+                    finish_reason = choice.finish_reason
 
                     prev_content = curr_content or ""
-                    curr_content = curr_chunk.choices[0].delta.content or ""
+                    curr_content = choice.delta.content or ""
 
                     new_content = prev_content if finish_reason == None else (prev_content + curr_content)
 
@@ -440,4 +442,7 @@ async def main() -> None:
     
 
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    pass

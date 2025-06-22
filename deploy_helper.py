@@ -76,7 +76,7 @@ def main():
         cleanup_and_exit(f"API request to Discloud failed: {e}\nDetails: {error_details}")
 
     # --- 4. Wait for App to Restart ---
-    wait_time = 20
+    wait_time = 5
     print(f"\nWaiting {wait_time} seconds for the app to restart...")
     time.sleep(wait_time)
 
