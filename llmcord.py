@@ -334,7 +334,7 @@ async def on_message(new_msg: discord.Message) -> None:
             embed.add_field(name=warning, value="", inline=False)
 
         use_plain_responses = config["use_plain_responses"]
-        max_message_length = 2000 if use_plain_responses else (4096 - len(STREAMING_INDICATOR))
+        max_message_length = 2000 if use_plain_responses else (3382 - len(STREAMING_INDICATOR))
 
         try:
             async with new_msg.channel.typing():

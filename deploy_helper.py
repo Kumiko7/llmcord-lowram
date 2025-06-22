@@ -66,7 +66,7 @@ def main():
     try:
         with open(ZIP_FILENAME, 'rb') as f:
             files = {'file': f}
-            response = requests.put(commit_url, headers=headers, files=files, timeout=60)
+            response = requests.put(commit_url, headers=headers, files=files, timeout=120)
         
         response.raise_for_status() # Raises an exception for 4xx/5xx status codes
         print(f"Upload successful! Discloud says: {response.json().get('message')}")
