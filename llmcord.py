@@ -22,6 +22,8 @@ logging.basicConfig(
 )
 
 MEMORY_LIMIT_MB = 100
+RESTART_LIMIT_MB = 85
+IMAGE_LIMIT = 720
 
 VISION_MODEL_TAGS = ("gpt-4", "o3", "o4", "claude", "gemini", "gemma", "llama", "pixtral", "mistral", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
@@ -238,7 +240,7 @@ async def on_message(new_msg: discord.Message) -> None:
                         for att in good_attachments:
                             parsedurl = urllib.parse.quote_plus(att.url)
                             if att.content_type.startswith("image") and len(parsedurl) <= 255:
-                                att.url = f"https://res.cloudinary.com/{config['cloudinary_name']}/image/fetch/c_limit,h_512,w_512/{parsedurl}"
+                                att.url = f"https://res.cloudinary.com/{config['cloudinary_name']}/image/fetch/c_limit,h_{IMAGE_LIMIT},w_{IMAGE_LIMIT}/{parsedurl}"
 
                     attachment_responses = await asyncio.gather(*[httpx_client.get(att.url) for att in good_attachments])
                     attachment_responses  = [res for res in attachment_responses if not res.is_error]
@@ -404,7 +406,7 @@ async def on_message(new_msg: discord.Message) -> None:
                 async with msg_nodes.setdefault(msg_id, MsgNode()).lock:
                     msg_nodes.pop(msg_id, None)
                     
-        if (await check_discloud_ram()) > 86:
+        if (await check_discloud_ram()) > RESTART_LIMIT_MB:
             logging.info("RAM is getting high, restarting app")
             await restart_discloud_app()
     except Exception as e:
