@@ -8,6 +8,7 @@ from typing import Any, Literal, Optional
 import discord
 from discord.app_commands import Choice
 from discord.ext import commands
+from discord.ui import LayoutView, TextDisplay
 import httpx
 from openai import AsyncOpenAI
 import yaml
@@ -25,7 +26,7 @@ MEMORY_LIMIT_MB = 100
 RESTART_LIMIT_MB = 85
 IMAGE_LIMIT = 720
 
-VISION_MODEL_TAGS = ("gpt-4", "o3", "o4", "claude", "gemini", "gemma", "llama", "pixtral", "mistral", "vision", "vl")
+VISION_MODEL_TAGS = ("claude", "gemini", "gemma", "gpt-4", "gpt-5", "grok-4", "llama", "llava", "mistral", "o3", "o4", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
 
 EMBED_COLOR_COMPLETE = discord.Color.dark_green()
@@ -169,7 +170,7 @@ async def model_autocomplete(interaction: discord.Interaction, curr_str: str) ->
 @discord_bot.event
 async def on_ready() -> None:
     if client_id := config["client_id"]:
-        logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317273088&scope=bot\n")
+        logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
 
     await discord_bot.tree.sync()
 
@@ -189,6 +190,8 @@ async def on_message(new_msg: discord.Message) -> None:
 
         # config = await asyncio.to_thread(get_config)
 
+        allow_dms = config.get("allow_dms", True)
+
         permissions = config["permissions"]
 
         user_is_admin = new_msg.author.id in permissions["users"]["admin_ids"]
@@ -202,26 +205,33 @@ async def on_message(new_msg: discord.Message) -> None:
         is_bad_user = not is_good_user or new_msg.author.id in blocked_user_ids or any(id in blocked_role_ids for id in role_ids)
 
         allow_all_channels = not allowed_channel_ids
-        is_good_channel = user_is_admin or config["allow_dms"] if is_dm else allow_all_channels or any(id in allowed_channel_ids for id in channel_ids)
+        is_good_channel = user_is_admin or allow_dms if is_dm else allow_all_channels or any(id in allowed_channel_ids for id in channel_ids)
         is_bad_channel = not is_good_channel or any(id in blocked_channel_ids for id in channel_ids)
 
         if is_bad_user or is_bad_channel:
             return
 
         provider_slash_model = curr_model
-        provider, model = provider_slash_model.split("/", 1)
-        model_parameters = config["models"].get(provider_slash_model, None)
+        provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
 
-        base_url = config["providers"][provider]["base_url"]
-        api_key = config["providers"][provider].get("api_key", "sk-no-key-required")
+        provider_config = config["providers"][provider]
+
+        base_url = provider_config["base_url"]
+        api_key = provider_config.get("api_key", "sk-no-key-required")
         openai_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
-        accept_images = any(x in model.lower() for x in VISION_MODEL_TAGS)
+        model_parameters = config["models"].get(provider_slash_model, None)
+
+        extra_headers = provider_config.get("extra_headers", None)
+        extra_query = provider_config.get("extra_query", None)
+        extra_body = (provider_config.get("extra_body", None) or {}) | (model_parameters or {}) or None
+
+        accept_images = any(x in provider_slash_model.lower() for x in VISION_MODEL_TAGS)
         accept_usernames = any(x in provider_slash_model.lower() for x in PROVIDERS_SUPPORTING_USERNAMES)
 
-        max_text = config["max_text"]
-        max_images = config["max_images"] if accept_images else 0
-        max_messages = config["max_messages"]
+        max_text = config.get("max_text", 100000)
+        max_images = config.get("max_images", 5) if accept_images else 0
+        max_messages = config.get("max_messages", 25)
 
         # Build message chain and set user warnings
         messages = []
@@ -248,6 +258,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     curr_node.text = "\n".join(
                         ([cleaned_content] if cleaned_content else [])
                         + ["\n".join(filter(None, (embed.title, embed.description, embed.footer.text))) for embed in curr_msg.embeds]
+                    + [component.content for component in curr_msg.components if component.type == discord.ComponentType.text_display]
                         + [resp.text for att, resp in zip(good_attachments, attachment_responses) if att.content_type.startswith("text")]
                     )
 
@@ -320,28 +331,39 @@ async def on_message(new_msg: discord.Message) -> None:
             system_prompt = system_prompt.replace("{date_jst}", now_jst.strftime("%B %d %Y")).replace("{time_jst}", now_jst.strftime("%H:%M:%S %Z%z"))
             
             if accept_usernames:
-                system_prompt += "\nUser's names are their Discord IDs and should be typed as '<@ID>'."
+                system_prompt += "\n\nUser's names are their Discord IDs and should be typed as '<@ID>'."
 
             messages.append(dict(role="system", content=system_prompt))
 
         # Generate and send response message(s) (can be multiple if response is long)
-        curr_content = finish_reason = edit_task = None
+        curr_content = finish_reason = None
         response_msgs = []
         response_contents = []
 
-        embed = discord.Embed()
-        for warning in sorted(user_warnings):
-            embed.add_field(name=warning, value="", inline=False)
+        openai_kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body)
 
         use_plain_responses = config["use_plain_responses"]
-        max_message_length = 2000 if use_plain_responses else (3382 - len(STREAMING_INDICATOR))
+        if use_plain_responses := config.get("use_plain_responses", False):
+            max_message_length = 4000
+        else:
+            max_message_length = 3382 - len(STREAMING_INDICATOR)
+            embed = discord.Embed.from_dict(dict(fields=[dict(name=warning, value="", inline=False) for warning in sorted(user_warnings)]))
+
+        async def reply_helper(**reply_kwargs) -> None:
+            reply_target = new_msg if not response_msgs else response_msgs[-1]
+            response_msg = await reply_target.reply(**reply_kwargs)
+            response_msgs.append(response_msg)
+
+            msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+            await msg_nodes[response_msg.id].lock.acquire()
 
         try:
             async with new_msg.channel.typing():
-                async for curr_chunk in await openai_client.chat.completions.create(model=model, messages=messages[::-1], stream=True, extra_body=model_parameters):
+                async for chunk in await openai_client.chat.completions.create(**openai_kwargs):
                     if finish_reason != None:
                         break
-                    if not (choice := curr_chunk.choices[0] if curr_chunk.choices else None):
+
+                    if not (choice := chunk.choices[0] if chunk.choices else None):
                         continue
 
                     finish_reason = choice.finish_reason
@@ -360,38 +382,28 @@ async def on_message(new_msg: discord.Message) -> None:
                     response_contents[-1] += new_content
 
                     if not use_plain_responses:
-                        ready_to_edit = (edit_task == None or edit_task.done()) and datetime.now().timestamp() - last_task_time >= EDIT_DELAY_SECONDS
+                        time_delta = datetime.now().timestamp() - last_task_time
+
+                        ready_to_edit = time_delta >= EDIT_DELAY_SECONDS
                         msg_split_incoming = finish_reason == None and len(response_contents[-1] + curr_content) > max_message_length
                         is_final_edit = finish_reason != None or msg_split_incoming
                         is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
 
                         if start_next_msg or ready_to_edit or is_final_edit:
-                            if edit_task != None:
-                                await edit_task
-
                             embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
                             embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
 
                             if start_next_msg:
-                                reply_to_msg = new_msg if response_msgs == [] else response_msgs[-1]
-                                response_msg = await reply_to_msg.reply(embed=embed, silent=True)
-                                response_msgs.append(response_msg)
-
-                                msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
-                                await msg_nodes[response_msg.id].lock.acquire()
+                                await reply_helper(embed=embed, silent=True)
                             else:
-                                edit_task = asyncio.create_task(response_msgs[-1].edit(embed=embed))
+                                await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
+                                await response_msgs[-1].edit(embed=embed)
 
                             last_task_time = datetime.now().timestamp()
 
                 if use_plain_responses:
                     for content in response_contents:
-                        reply_to_msg = new_msg if response_msgs == [] else response_msgs[-1]
-                        response_msg = await reply_to_msg.reply(content=content, suppress_embeds=True)
-                        response_msgs.append(response_msg)
-
-                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
-                        await msg_nodes[response_msg.id].lock.acquire()
+                        await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
 
         except Exception as e:
             raise e

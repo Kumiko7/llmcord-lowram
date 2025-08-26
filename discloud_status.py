@@ -86,11 +86,31 @@ async def start_discloud_app():
         print(f"Successfully started app: {DISCLOUD_APP_ID}. API response: " + "\n" + str(data))
         
     except Exception as e:
-        logging.exception(f"An unhandled error occurred checking Discloud")
+        logging.exception(f"An unhandled error occurred starting Discloud")
+        
+async def stop_discloud_app():
+    try:
+        print(f" Attempting to stop Discloud app: {DISCLOUD_APP_ID}...")
+
+        headers = {
+            "api-token": DISCLOUD_API_TOKEN
+        }
+
+        stop = f"{DISCLOUD_API_BASE_URL}/app/{DISCLOUD_APP_ID}/stop"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(stop, headers=headers)
+        response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+
+        data = response.json()
+        print(f"Successfully stopped app: {DISCLOUD_APP_ID}. API response: " + "\n" + str(data))
+        
+    except Exception as e:
+        logging.exception(f"An unhandled error occurred stopping Discloud")
 
 async def main() -> None:
     #await start_discloud_app()
-    await discloud_app()
+    await stop_discloud_app()
+    #await discloud_app()
     
 
 
