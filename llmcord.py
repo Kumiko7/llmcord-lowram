@@ -641,18 +641,20 @@ async def on_message(new_msg: discord.Message) -> None:
                 },
             },
         })
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "execute_python_code",
-                "description": "Executes arbitrary Python code. The code runs within an `exec()` statement. It can be used for calculations or quick tests. Use with caution.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"code": {"type": "string", "description": "The Python code to execute, often provided within a ```python ... ``` block."}},
-                    "required": ["code"],
+        
+        if user_is_admin:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "execute_python_code",
+                    "description": "Executes arbitrary Python code. The code runs within an `exec()` statement. It can be used for calculations or quick tests. Use with caution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"code": {"type": "string", "description": "The Python code to execute, often provided within a ```python ... ``` block."}},
+                        "required": ["code"],
+                    },
                 },
-            },
-        })
+            })
 
 
         conversation_history = messages[::-1]
