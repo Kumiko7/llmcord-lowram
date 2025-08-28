@@ -19,6 +19,7 @@ import schedule
 from serpapi import GoogleSearch
 from collections import defaultdict
 import json
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -224,6 +225,76 @@ async def search_vndb(query: str) -> str:
     except Exception as e:
         logging.error(f"Error during VNDB search: {e}")
         return f"An unexpected error occurred during the VNDB search: {e}"
+        
+# --- ANILIST TOOL IMPLEMENTATION ---
+async def search_anilist(query: str, media_type: str) -> str:
+    """Searches for anime or manga on AniList and returns formatted results."""
+    api_url = "https://graphql.anilist.co"
+    
+    graphql_query = """
+    query ($search: String, $type: MediaType) {
+      Media (search: $search, type: $type, sort: SEARCH_MATCH) {
+        id
+        title { romaji english }
+        description(asHtml: false)
+        format status episodes chapters volumes averageScore
+        genres
+        studios(isMain: true) { nodes { name } }
+        staff(sort: RELEVANCE, perPage: 4) { edges { role node { name { full } } } }
+        siteUrl
+      }
+    }
+    """
+    variables = {"search": query, "type": media_type.upper()}
+
+    try:
+        response = await httpx_client.post(api_url, json={"query": graphql_query, "variables": variables}, timeout=10.0)
+        response.raise_for_status()
+        data = response.json()
+
+        media = data.get("data", {}).get("Media")
+        if not media:
+            return f"No {media_type.lower()} found for '{query}' on AniList."
+
+        description = media.get('description', 'No description available.')
+        if description:
+            description = re.sub(r'<br\s*/?>', '\n', description)
+            description = re.sub(r'<[^>]+>', '', description)
+            if len(description) > 400: description = description[:400] + "..."
+        
+        score = f"{media.get('averageScore')}/100" if media.get('averageScore') else "Not rated"
+
+        title_romaji = media.get('title', {}).get('romaji', 'N/A')
+        title_english = media.get('title', {}).get('english')
+        title_str = f"{title_romaji}" + (f" ({title_english})" if title_english and title_english != title_romaji else "")
+
+        details = [
+            f"Title: {title_str}",
+            f"Format: {str(media.get('format', 'N/A')).replace('_', ' ')}",
+            f"Status: {str(media.get('status', 'N/A')).replace('_', ' ')}",
+            f"Score: {score}",
+            f"Genres: {', '.join(media.get('genres', []))}",
+        ]
+
+        if media_type == "ANIME":
+            if episodes := media.get('episodes'): details.append(f"Episodes: {episodes}")
+            if studios := media.get('studios', {}).get('nodes'): details.append(f"Studio: {', '.join([s['name'] for s in studios])}")
+        elif media_type == "MANGA":
+            if chapters := media.get('chapters'): details.append(f"Chapters: {chapters}")
+            if volumes := media.get('volumes'): details.append(f"Volumes: {volumes}")
+            if staff := media.get('staff', {}).get('edges'):
+                authors = [s['node']['name']['full'] for s in staff if s['role'] in ('Story & Art', 'Story')]
+                if authors: details.append(f"Author(s): {', '.join(authors)}")
+
+        details.extend([f"\nDescription:\n{description}", f"\nURL: {media.get('siteUrl')}"])
+        return "\n".join(details)
+
+    except httpx.HTTPStatusError as e:
+        logging.error(f"HTTP error during AniList search: {e.response.status_code} - {e.response.text}")
+        return f"Error: Received status code {e.response.status_code} from AniList API."
+    except Exception as e:
+        logging.error(f"Error during AniList search: {e}")
+        return f"An unexpected error occurred during the AniList search: {e}"
 
 async def restart_discloud_app():
     try:
@@ -496,6 +567,21 @@ async def on_message(new_msg: discord.Message) -> None:
                 },
             },
         })
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "search_anilist",
+                "description": "Search for anime or manga on AniList to get details like description, score, status, episodes, etc.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The title of the anime or manga to search for."},
+                        "media_type": {"type": "string", "enum": ["ANIME", "MANGA"], "description": "The type of media to search for."}
+                    },
+                    "required": ["query", "media_type"],
+                },
+            },
+        })
 
 
         conversation_history = messages[::-1]
@@ -516,10 +602,17 @@ async def on_message(new_msg: discord.Message) -> None:
             await msg_nodes[msg.id].lock.acquire()
             return msg
 
-        async def stream_and_update(stream):
+        async def stream_and_update(stream, executed_tools: list[str] = None):
             global last_task_time
             curr_content, finish_reason = "", None
             tool_call_assembler = defaultdict(lambda: {"id": "", "function": {"name": "", "arguments": ""}})
+            
+            # --- Prepare footer text if tools were used ---
+            footer_text = None
+            if executed_tools:
+                footer_text = " | ".join(executed_tools)
+                if len(footer_text) > 2048:  # Discord footer limit
+                    footer_text = footer_text[:2045] + "..."
             
             async for chunk in stream:
                 if not chunk.choices: continue
@@ -554,6 +647,9 @@ async def on_message(new_msg: discord.Message) -> None:
                                 description=response_contents[-1] + ('' if is_final_edit else STREAMING_INDICATOR),
                                 color=EMBED_COLOR_COMPLETE if (finish_reason and finish_reason.lower() in ("stop", "end_turn")) else EMBED_COLOR_INCOMPLETE
                             )
+                            if footer_text:
+                                embed.set_footer(text=footer_text)
+                            
                             if start_next_msg: await reply_helper(embed=embed, silent=True)
                             else:
                                 if not response_msgs: await reply_helper(embed=embed, silent=True)
@@ -575,6 +671,7 @@ async def on_message(new_msg: discord.Message) -> None:
                 # --- First Streaming Attempt ---
                 stream = await openai_client.chat.completions.create(**openai_kwargs)
                 requested_tool_calls = await stream_and_update(stream)
+                executed_tool_calls = []
 
                 # --- If Tool Calls Were Requested ---
                 if requested_tool_calls:
@@ -585,26 +682,25 @@ async def on_message(new_msg: discord.Message) -> None:
                         func_name = tool_call["function"]["name"]
                         try:
                             args = json.loads(tool_call["function"]["arguments"])
-                            query = args.get("query")
+                            query = args.get("query", "")
                             
-                            # --- TOOL EXECUTION LOGIC ---
+                            # Truncate query for display
+                            query_display = (query[:25] + '...') if len(query) > 25 else query
+
                             if func_name == "google_search":
-                                logging.info(f"Performing Google search for: '{query}'")
-                                if not use_plain_responses and response_msgs:
-                                    embed = response_msgs[-1].embeds[0]
-                                    embed.add_field(name="Tool Call", value=f"🔎 Searching Google for:\n> {query}", inline=False)
-                                    await response_msgs[-1].edit(embed=embed)
+                                executed_tool_calls.append(f"🔎 Google: '{query_display}'")
                                 search_results = await perform_google_search(query)
-                                tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
-                            
                             elif func_name == "search_vndb":
-                                logging.info(f"Searching VNDB for: '{query}'")
-                                if not use_plain_responses and response_msgs:
-                                    embed = response_msgs[-1].embeds[0]
-                                    embed.add_field(name="Tool Call", value=f"📚 Searching VNDB for:\n> {query}", inline=False)
-                                    await response_msgs[-1].edit(embed=embed)
+                                executed_tool_calls.append(f"📚 VNDB: '{query_display}'")
                                 search_results = await search_vndb(query)
-                                tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
+                            elif func_name == "search_anilist":
+                                media_type = args.get("media_type", "ANIME")
+                                executed_tool_calls.append(f"💽 AniList/{media_type.title()}: '{query_display}'")
+                                search_results = await search_anilist(query, media_type)
+                            else:
+                                search_results = "Unknown tool called."
+
+                            tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
 
                         except json.JSONDecodeError:
                             logging.error("Failed to decode tool arguments.")
@@ -616,7 +712,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     # --- Second Streaming Attempt with Tool Results ---
                     openai_kwargs['messages'] = conversation_history
                     final_stream = await openai_client.chat.completions.create(**openai_kwargs)
-                    await stream_and_update(final_stream)
+                    await stream_and_update(final_stream, executed_tools=executed_tool_calls)
 
                 if use_plain_responses:
                     for content in response_contents: await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))

@@ -16,6 +16,7 @@ import urllib.parse
 from zoneinfo import ZoneInfo;
 import schedule
 import re
+import sys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,9 +109,18 @@ async def stop_discloud_app():
         logging.exception(f"An unhandled error occurred stopping Discloud")
 
 async def main() -> None:
-    #await start_discloud_app()
-    await stop_discloud_app()
-    #await discloud_app()
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
+        if command == "start":
+            await start_discloud_app()
+        elif command == "stop":
+            await stop_discloud_app()
+        else:
+            print(f"Unknown command: {command}. Defaulting to status.")
+            await discloud_app()
+    else:
+        print("No command specified. Defaulting to status.")
+        await discloud_app()
     
 
 
