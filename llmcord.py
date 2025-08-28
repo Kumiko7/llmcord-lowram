@@ -1,7 +1,7 @@
 import asyncio
 from base64 import b64encode
 from dataclasses import dataclass, field
-from datetime import datetime, timezone 
+from datetime import datetime, timezone, date
 import logging
 from typing import Any, Literal, Optional
 
@@ -121,7 +121,7 @@ async def perform_google_search(query: str) -> str:
 
         return await asyncio.to_thread(search)
     except Exception as e:
-        logging.error(f"Error during Google search: {e}")
+        logging.exception(f"Error during Google search: {e}")
         return f"An error occurred during search: {e}"
         
 # --- VNDB TOOL IMPLEMENTATION (WITH STAFF PRIORITIZATION) ---
@@ -220,10 +220,10 @@ async def search_vndb(query: str) -> str:
         return "\n\n---\n\n".join(formatted_results)
 
     except httpx.HTTPStatusError as e:
-        logging.error(f"HTTP error during VNDB search: {e.response.status_code} - {e.response.text}")
+        logging.exception(f"HTTP error during VNDB search: {e.response.status_code} - {e.response.text}")
         return f"Error: Received status code {e.response.status_code} from VNDB API."
     except Exception as e:
-        logging.error(f"Error during VNDB search: {e}")
+        logging.exception(f"Error during VNDB search: {e}")
         return f"An unexpected error occurred during the VNDB search: {e}"
         
 # --- ANILIST TOOL IMPLEMENTATION ---
@@ -242,6 +242,7 @@ async def search_anilist(query: str, media_type: str) -> str:
         studios(isMain: true) { nodes { name } }
         staff(sort: RELEVANCE, perPage: 4) { edges { role node { name { full } } } }
         siteUrl
+        startDate { year month day }
       }
     }
     """
@@ -275,6 +276,15 @@ async def search_anilist(query: str, media_type: str) -> str:
             f"Score: {score}",
             f"Genres: {', '.join(media.get('genres', []))}",
         ]
+        
+        start_date = media.get('startDate')
+        if start_date and all(start_date.values()):
+            try:
+                # Prioritising Japanese date format as requested
+                release_date_str = date(start_date['year'], start_date['month'], start_date['day']).strftime("%Y/%m/%d")
+                details.append(f"Release Date: {release_date_str}")
+            except ValueError:
+                details.append("Release Date: Invalid date")
 
         if media_type == "ANIME":
             if episodes := media.get('episodes'): details.append(f"Episodes: {episodes}")
@@ -290,10 +300,10 @@ async def search_anilist(query: str, media_type: str) -> str:
         return "\n".join(details)
 
     except httpx.HTTPStatusError as e:
-        logging.error(f"HTTP error during AniList search: {e.response.status_code} - {e.response.text}")
+        logging.exception(f"HTTP error during AniList search: {e.response.status_code} - {e.response.text}")
         return f"Error: Received status code {e.response.status_code} from AniList API."
     except Exception as e:
-        logging.error(f"Error during AniList search: {e}")
+        logging.exception(f"Error during AniList search: {e}")
         return f"An unexpected error occurred during the AniList search: {e}"
 
 async def restart_discloud_app():
@@ -675,13 +685,15 @@ async def on_message(new_msg: discord.Message) -> None:
 
                 # --- If Tool Calls Were Requested ---
                 if requested_tool_calls:
-                    conversation_history.append({"role": "assistant", "content": None, "tool_calls": requested_tool_calls})
+                    
                     
                     tool_messages = []
                     for tool_call in requested_tool_calls:
                         func_name = tool_call["function"]["name"]
                         try:
-                            args = json.loads(tool_call["function"]["arguments"])
+                            args = tool_call["function"]["arguments"]
+                            #args = args[:args.find('}') + 1]
+                            args = json.loads(args)
                             query = args.get("query", "")
                             
                             # Truncate query for display
@@ -701,13 +713,14 @@ async def on_message(new_msg: discord.Message) -> None:
                                 search_results = "Unknown tool called."
 
                             tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
+                            
+                            conversation_history.append({"role": "assistant", "content": None, "tool_calls": requested_tool_calls})
+                            # Append tool results to history
+                            conversation_history.extend(tool_messages)
 
                         except json.JSONDecodeError:
-                            logging.error("Failed to decode tool arguments.")
-                            tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": "Error: Invalid arguments."})
-
-                    # Append tool results to history
-                    conversation_history.extend(tool_messages)
+                            logging.exception(f"Failed to decode tool arguments. {tool_call}")
+                            executed_tool_calls.append(f"❌ Error using tool {func_name}'")
                     
                     # --- Second Streaming Attempt with Tool Results ---
                     openai_kwargs['messages'] = conversation_history
