@@ -16,6 +16,9 @@ import platform
 import urllib.parse
 from zoneinfo import ZoneInfo;
 import schedule
+from serpapi import GoogleSearch
+from collections import defaultdict
+import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +91,139 @@ class MsgNode:
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+
+async def perform_google_search(query: str) -> str:
+    """Performs a Google search using SerpApi and returns formatted results."""
+    if not (api_key := config.get("serpapi_api_key")):
+        return "Google Search is not configured with a SerpApi key."
+    try:
+        def search():
+            params = {"q": query, "api_key": api_key, "engine": "google"}
+            search_results = GoogleSearch(params).get_dict()
+            
+            snippets = []
+            if "answer_box" in search_results:
+                answer = search_results["answer_box"].get("answer") or search_results["answer_box"].get("snippet")
+                if answer:
+                    snippets.append({"answer": answer})
+            
+            if "organic_results" in search_results:
+                for result in search_results["organic_results"][:5]:
+                    snippet = {
+                        "title": result.get("title"),
+                        "link": result.get("link"),
+                        "snippet": result.get("snippet"),
+                    }
+                    snippets.append(snippet)
+            
+            return json.dumps(snippets) if snippets else "No results found."
+
+        return await asyncio.to_thread(search)
+    except Exception as e:
+        logging.error(f"Error during Google search: {e}")
+        return f"An error occurred during search: {e}"
+        
+# --- VNDB TOOL IMPLEMENTATION (WITH STAFF PRIORITIZATION) ---
+async def search_vndb(query: str) -> str:
+    """Searches for a visual novel on VNDB and returns formatted results including staff and characters."""
+    try:
+        api_url = "https://api.vndb.org/kana/vn"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "filters": ["search", "=", query],
+            "fields": (
+                "id, title, alttitle, description, released, rating, votecount, image.url, "
+                "staff{role, name}, va{character{name}, staff{name}}"
+            ),
+            "sort": "searchrank",
+            "results": 3,
+        }
+        
+        response = await httpx_client.post(api_url, json=payload, timeout=10.0)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("results"):
+            return "No visual novels found for that query."
+
+        formatted_results = []
+        for vn in data["results"]:
+            description = vn.get('description', 'No description available.')
+            if description:
+                description = description.split('\n[spoiler]')[0]
+                description = "".join(filter(lambda c: c not in "[]", description))
+                if len(description) > 400:
+                    description = description[:400] + "..."
+
+            rating = f"{vn.get('rating', 0) / 10:.1f}/10" if vn.get('rating') else "Not rated"
+
+            result_str = (
+                f"ID: {vn.get('id')}\n"
+                f"Title: {vn.get('title')}\n"
+                f"Alternative Title: {vn.get('alttitle')}\n"
+                f"Release Date: {vn.get('released')}\n"
+                f"Rating: {rating} (from {vn.get('votecount', 0)} votes)\n"
+                f"Description: {description}\n"
+            )
+
+            # Process staff, grouping by role with prioritization
+            if staff_list := vn.get("staff"):
+                staff_by_role = defaultdict(list)
+                for member in staff_list:
+                    if name := member.get("name"):
+                        staff_by_role[member.get("role", "Unknown")].append(name)
+                
+                if staff_by_role:
+                    staff_str = "\nStaff:\n"
+                    
+                    # --- Prioritization Logic ---
+                    # Define priority roles. 'art' is the official role name for artist.
+                    priority_roles = ['scenario', 'art']
+                    all_roles = list(staff_by_role.keys())
+                    # Sort roles: priority roles come first, then the rest alphabetically
+                    all_roles.sort(key=lambda role: (role not in priority_roles, role))
+                    # --- End Prioritization Logic ---
+
+                    staff_count = 0
+                    limit = 10
+                    for role in all_roles:
+                        if staff_count >= limit:
+                            staff_str += "- ...and more.\n"
+                            break
+                        
+                        names = staff_by_role[role]
+                        role_str = f"- {role.replace('_', ' ').title()}: {', '.join(sorted(list(set(names)))[:3])}"
+                        if len(names) > 3:
+                            role_str += ", ..."
+                        staff_str += role_str + "\n"
+                        staff_count += len(names)
+                    result_str += staff_str
+
+            # Process characters and voice actors
+            if va_list := vn.get("va"):
+                char_limit = 8
+                char_list = [
+                    f"{va.get('character', {}).get('name', 'Unknown Char')} "
+                    f"(VA: {va.get('staff', {}).get('name', 'Unknown VA')})"
+                    for va in va_list
+                    if va.get('character', {}).get('name') and va.get('staff', {}).get('name')
+                ]
+                unique_chars = list(dict.fromkeys(char_list))
+                if unique_chars:
+                    result_str += "\nCharacters:\n- " + "\n- ".join(unique_chars[:char_limit])
+                    if len(unique_chars) > char_limit:
+                        result_str += "\n- ...and more."
+            
+            formatted_results.append(result_str)
+        
+        return "\n\n---\n\n".join(formatted_results)
+
+    except httpx.HTTPStatusError as e:
+        logging.error(f"HTTP error during VNDB search: {e.response.status_code} - {e.response.text}")
+        return f"Error: Received status code {e.response.status_code} from VNDB API."
+    except Exception as e:
+        logging.error(f"Error during VNDB search: {e}")
+        return f"An unexpected error occurred during the VNDB search: {e}"
 
 async def restart_discloud_app():
     try:
@@ -335,75 +471,155 @@ async def on_message(new_msg: discord.Message) -> None:
 
             messages.append(dict(role="system", content=system_prompt))
 
-        # Generate and send response message(s) (can be multiple if response is long)
-        curr_content = finish_reason = None
-        response_msgs = []
-        response_contents = []
+        # --- Tool Definition ---
+        tools = []
+        if config.get("serpapi_api_key"):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "google_search",
+                    "description": "Get information from the web for recent events or specific facts.",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The search query to use."}}, "required": ["query"]},
+                },
+            })
+            
+        # Add the VNDB tool to the list of available tools
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "search_vndb",
+                "description": "Search for a visual novel (VN) on VNDB.org to get its title, description, rating, and other details.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "The title or search term for the visual novel."}},
+                    "required": ["query"],
+                },
+            },
+        })
 
-        openai_kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body)
 
-        use_plain_responses = config["use_plain_responses"]
-        if use_plain_responses := config.get("use_plain_responses", False):
-            max_message_length = 4000
-        else:
-            max_message_length = 3382 - len(STREAMING_INDICATOR)
-            embed = discord.Embed.from_dict(dict(fields=[dict(name=warning, value="", inline=False) for warning in sorted(user_warnings)]))
-
-        async def reply_helper(**reply_kwargs) -> None:
+        conversation_history = messages[::-1]
+        openai_kwargs = dict(model=model, messages=conversation_history, stream=True, extra_body=extra_body)
+        if tools:
+            openai_kwargs["tools"] = tools
+            openai_kwargs["tool_choice"] = "auto"
+        
+        response_msgs, response_contents = [], []
+        use_plain_responses = config.get("use_plain_responses", False)
+        max_message_length = 4000 if use_plain_responses else 3900
+        
+        async def reply_helper(**kwargs):
             reply_target = new_msg if not response_msgs else response_msgs[-1]
-            response_msg = await reply_target.reply(**reply_kwargs)
-            response_msgs.append(response_msg)
+            msg = await reply_target.reply(**kwargs)
+            response_msgs.append(msg)
+            msg_nodes[msg.id] = MsgNode(parent_msg=new_msg)
+            await msg_nodes[msg.id].lock.acquire()
+            return msg
 
-            msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
-            await msg_nodes[response_msg.id].lock.acquire()
-
-        try:
-            async with new_msg.channel.typing():
-                async for chunk in await openai_client.chat.completions.create(**openai_kwargs):
-                    if finish_reason != None:
-                        break
-
-                    if not (choice := chunk.choices[0] if chunk.choices else None):
-                        continue
-
-                    finish_reason = choice.finish_reason
-
-                    prev_content = curr_content or ""
-                    curr_content = choice.delta.content or ""
-
-                    new_content = prev_content if finish_reason == None else (prev_content + curr_content)
-
-                    if response_contents == [] and new_content == "":
-                        continue
-
-                    if start_next_msg := response_contents == [] or len(response_contents[-1] + new_content) > max_message_length:
-                        response_contents.append("")
-
+        async def stream_and_update(stream):
+            global last_task_time
+            curr_content, finish_reason = "", None
+            tool_call_assembler = defaultdict(lambda: {"id": "", "function": {"name": "", "arguments": ""}})
+            
+            async for chunk in stream:
+                if not chunk.choices: continue
+                choice = chunk.choices[0]
+                finish_reason = choice.finish_reason
+                delta = choice.delta
+                
+                # Assemble tool calls if they are in the delta
+                if delta.tool_calls:
+                    for tc_chunk in delta.tool_calls:
+                        asm = tool_call_assembler[tc_chunk.index]
+                        if tc_chunk.id: asm["id"] = tc_chunk.id
+                        if tc_chunk.function:
+                            asm["function"]["name"] += tc_chunk.function.name or ""
+                            asm["function"]["arguments"] += tc_chunk.function.arguments or ""
+                
+                # Process regular content
+                if delta.content:
+                    new_content = delta.content
+                    if not response_contents: response_contents.append("")
+                    
+                    start_next_msg = len(response_contents[-1] + new_content) > max_message_length
+                    if start_next_msg: response_contents.append("")
+                    
                     response_contents[-1] += new_content
 
                     if not use_plain_responses:
                         time_delta = datetime.now().timestamp() - last_task_time
-
-                        ready_to_edit = time_delta >= EDIT_DELAY_SECONDS
-                        msg_split_incoming = finish_reason == None and len(response_contents[-1] + curr_content) > max_message_length
-                        is_final_edit = finish_reason != None or msg_split_incoming
-                        is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
-
-                        if start_next_msg or ready_to_edit or is_final_edit:
-                            embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
-                            embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
-
-                            if start_next_msg:
-                                await reply_helper(embed=embed, silent=True)
+                        is_final_edit = finish_reason is not None or start_next_msg
+                        if start_next_msg or time_delta >= EDIT_DELAY_SECONDS or is_final_edit:
+                            embed = discord.Embed(
+                                description=response_contents[-1] + ('' if is_final_edit else STREAMING_INDICATOR),
+                                color=EMBED_COLOR_COMPLETE if (finish_reason and finish_reason.lower() in ("stop", "end_turn")) else EMBED_COLOR_INCOMPLETE
+                            )
+                            if start_next_msg: await reply_helper(embed=embed, silent=True)
                             else:
-                                await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
-                                await response_msgs[-1].edit(embed=embed)
-
+                                if not response_msgs: await reply_helper(embed=embed, silent=True)
+                                else:
+                                    if time_delta < EDIT_DELAY_SECONDS: await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
+                                    await response_msgs[-1].edit(embed=embed)
                             last_task_time = datetime.now().timestamp()
+            
+            # Return assembled tool calls if the reason for finishing was a tool call
+            if finish_reason == 'tool_calls':
+                return [
+                    {"id": asm["id"], "type": "function", "function": asm["function"]}
+                    for _, asm in sorted(tool_call_assembler.items())
+                ]
+            return None
+
+        try:
+            async with new_msg.channel.typing():
+                # --- First Streaming Attempt ---
+                stream = await openai_client.chat.completions.create(**openai_kwargs)
+                requested_tool_calls = await stream_and_update(stream)
+
+                # --- If Tool Calls Were Requested ---
+                if requested_tool_calls:
+                    conversation_history.append({"role": "assistant", "content": None, "tool_calls": requested_tool_calls})
+                    
+                    tool_messages = []
+                    for tool_call in requested_tool_calls:
+                        func_name = tool_call["function"]["name"]
+                        try:
+                            args = json.loads(tool_call["function"]["arguments"])
+                            query = args.get("query")
+                            
+                            # --- TOOL EXECUTION LOGIC ---
+                            if func_name == "google_search":
+                                logging.info(f"Performing Google search for: '{query}'")
+                                if not use_plain_responses and response_msgs:
+                                    embed = response_msgs[-1].embeds[0]
+                                    embed.add_field(name="Tool Call", value=f"🔎 Searching Google for:\n> {query}", inline=False)
+                                    await response_msgs[-1].edit(embed=embed)
+                                search_results = await perform_google_search(query)
+                                tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
+                            
+                            elif func_name == "search_vndb":
+                                logging.info(f"Searching VNDB for: '{query}'")
+                                if not use_plain_responses and response_msgs:
+                                    embed = response_msgs[-1].embeds[0]
+                                    embed.add_field(name="Tool Call", value=f"📚 Searching VNDB for:\n> {query}", inline=False)
+                                    await response_msgs[-1].edit(embed=embed)
+                                search_results = await search_vndb(query)
+                                tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
+
+                        except json.JSONDecodeError:
+                            logging.error("Failed to decode tool arguments.")
+                            tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": "Error: Invalid arguments."})
+
+                    # Append tool results to history
+                    conversation_history.extend(tool_messages)
+                    
+                    # --- Second Streaming Attempt with Tool Results ---
+                    openai_kwargs['messages'] = conversation_history
+                    final_stream = await openai_client.chat.completions.create(**openai_kwargs)
+                    await stream_and_update(final_stream)
 
                 if use_plain_responses:
-                    for content in response_contents:
-                        await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
+                    for content in response_contents: await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
 
         except Exception as e:
             raise e

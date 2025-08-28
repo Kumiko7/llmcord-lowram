@@ -5,6 +5,7 @@ client_id:
 status_message: 
 
 cloudinary_name: 
+serpapi_api_key: 
 discloud_app: 
 discloud_token: 
 

@@ -3,3 +3,4 @@ httpx
 openai
 pyyaml
 schedule
+google-search-results
