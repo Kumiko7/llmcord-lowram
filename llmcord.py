@@ -12,6 +12,7 @@ from discord.ui import LayoutView, TextDisplay
 import httpx
 from openai import AsyncOpenAI
 import yaml
+
 import platform
 import urllib.parse
 from zoneinfo import ZoneInfo;
@@ -20,6 +21,10 @@ from serpapi import GoogleSearch
 from collections import defaultdict
 import json
 import re
+import contextlib
+import traceback
+import io
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -305,6 +310,50 @@ async def search_anilist(query: str, media_type: str) -> str:
     except Exception as e:
         logging.exception(f"Error during AniList search: {e}")
         return f"An unexpected error occurred during the AniList search: {e}"
+        
+async def execute_python_code(code: str) -> str:
+    """Executes arbitrary Python code in a restricted environment and returns the output."""
+    # Clean up the code block from Markdown
+    if code.startswith("```python"):
+        code = code[9:]
+    elif code.startswith("```"):
+        code = code[3:]
+    if code.endswith("```"):
+        code = code[:-3]
+    code = code.strip()
+
+    if not code:
+        return "No code provided to execute."
+    
+    logging.info(f"Code Execution: {code}")
+
+    local_namespace = {}
+    stdout_capture = io.StringIO()
+    
+    # Define the synchronous execution part
+    def sync_exec():
+        with contextlib.redirect_stdout(stdout_capture):
+            exec(code, globals(), local_namespace)
+
+    try:
+        # Run the synchronous code in a separate thread with a timeout
+        await asyncio.wait_for(asyncio.to_thread(sync_exec), timeout=10.0)
+        
+        output = stdout_capture.getvalue()
+        # Truncate output to avoid Discord message limit
+        if len(output) > 1900:
+            output = "Output truncated:\n" + output[:1900] + "..."
+        
+        return f"Output:\n```\n{output or '[No output]'}\n```"
+
+    except asyncio.TimeoutError:
+        return "Error: Code execution timed out after 10 seconds."
+    except Exception:
+        # Capture and format the full exception traceback
+        error_trace = traceback.format_exc()
+        if len(error_trace) > 1900:
+            error_trace = "Error truncated:\n" + error_trace[:1900] + "..."
+        return f"An exception occurred:\n```\n{error_trace}\n```"
 
 async def restart_discloud_app():
     try:
@@ -592,6 +641,18 @@ async def on_message(new_msg: discord.Message) -> None:
                 },
             },
         })
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "execute_python_code",
+                "description": "Executes arbitrary Python code. The code runs within an `exec()` statement. It can be used for calculations or quick tests. Use with caution.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"code": {"type": "string", "description": "The Python code to execute, often provided within a ```python ... ``` block."}},
+                    "required": ["code"],
+                },
+            },
+        })
 
 
         conversation_history = messages[::-1]
@@ -692,7 +753,6 @@ async def on_message(new_msg: discord.Message) -> None:
                         func_name = tool_call["function"]["name"]
                         try:
                             args = tool_call["function"]["arguments"]
-                            #args = args[:args.find('}') + 1]
                             args = json.loads(args)
                             query = args.get("query", "")
                             
@@ -709,6 +769,11 @@ async def on_message(new_msg: discord.Message) -> None:
                                 media_type = args.get("media_type", "ANIME")
                                 executed_tool_calls.append(f"💽 AniList/{media_type.title()}: '{query_display}'")
                                 search_results = await search_anilist(query, media_type)
+                            elif func_name == "execute_python_code":
+                                code = args.get("code", "")
+                                code_display = code
+                                executed_tool_calls.append(f"🐍 Python: \n'{code_display}'")
+                                search_results = await execute_python_code(code)
                             else:
                                 search_results = "Unknown tool called."
 
