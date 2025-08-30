@@ -677,60 +677,77 @@ async def on_message(new_msg: discord.Message) -> None:
 
         async def stream_and_update(stream, executed_tools: list[str] = None):
             global last_task_time
-            curr_content, finish_reason = "", None
+            curr_content = finish_reason = None
             tool_call_assembler = defaultdict(lambda: {"id": "", "function": {"name": "", "arguments": ""}})
-            
+            if use_plain_responses := config.get("use_plain_responses", False):
+                max_message_length = 4000
+            else:
+                max_message_length = 4096 - len(STREAMING_INDICATOR)
+                embed = discord.Embed.from_dict(dict(fields=[dict(name=warning, value="", inline=False) for warning in sorted(user_warnings)]))
             # --- Prepare footer text if tools were used ---
             footer_text = None
             if executed_tools:
                 footer_text = " | ".join(executed_tools)
                 if len(footer_text) > 2048:  # Discord footer limit
                     footer_text = footer_text[:2045] + "..."
-            
+                    
             async for chunk in stream:
-                if not chunk.choices: continue
-                choice = chunk.choices[0]
-                finish_reason = choice.finish_reason
-                delta = choice.delta
-                
+                if finish_reason != None:
+                    break
+                    
+                if not (choice := chunk.choices[0] if chunk.choices else None):
+                    continue
+                    
                 # Assemble tool calls if they are in the delta
-                if delta.tool_calls:
-                    for tc_chunk in delta.tool_calls:
+                if choice.delta.tool_calls:
+                    for tc_chunk in choice.delta.tool_calls:
                         asm = tool_call_assembler[tc_chunk.index]
                         if tc_chunk.id: asm["id"] = tc_chunk.id
                         if tc_chunk.function:
                             asm["function"]["name"] += tc_chunk.function.name or ""
                             asm["function"]["arguments"] += tc_chunk.function.arguments or ""
-                
-                # Process regular content
-                if delta.content:
-                    new_content = delta.content
-                    if not response_contents: response_contents.append("")
-                    
-                    start_next_msg = len(response_contents[-1] + new_content) > max_message_length
-                    if start_next_msg: response_contents.append("")
-                    
-                    response_contents[-1] += new_content
 
-                    if not use_plain_responses:
-                        time_delta = datetime.now().timestamp() - last_task_time
-                        is_final_edit = finish_reason is not None or start_next_msg
-                        if start_next_msg or time_delta >= EDIT_DELAY_SECONDS or is_final_edit:
-                            embed = discord.Embed(
-                                description=response_contents[-1] + ('' if is_final_edit else STREAMING_INDICATOR),
-                                color=EMBED_COLOR_COMPLETE if (finish_reason and finish_reason.lower() in ("stop", "end_turn")) else EMBED_COLOR_INCOMPLETE
-                            )
-                            if footer_text:
-                                embed.set_footer(text=footer_text)
-                            
-                            if start_next_msg: await reply_helper(embed=embed, silent=True)
-                            else:
-                                if not response_msgs: await reply_helper(embed=embed, silent=True)
-                                else:
-                                    if time_delta < EDIT_DELAY_SECONDS: await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
-                                    await response_msgs[-1].edit(embed=embed)
-                            last_task_time = datetime.now().timestamp()
-            
+                finish_reason = choice.finish_reason
+
+                prev_content = curr_content or ""
+                curr_content = choice.delta.content or ""
+
+                new_content = prev_content if finish_reason == None else (prev_content + curr_content)
+
+                if response_contents == [] and new_content == "":
+                    continue
+
+                if start_next_msg := response_contents == [] or len(response_contents[-1] + new_content) > max_message_length:
+                    response_contents.append("")
+
+                response_contents[-1] += new_content
+
+                if not use_plain_responses:
+                    time_delta = datetime.now().timestamp() - last_task_time
+
+                    ready_to_edit = time_delta >= EDIT_DELAY_SECONDS
+                    msg_split_incoming = finish_reason == None and len(response_contents[-1] + curr_content) > max_message_length
+                    is_final_edit = finish_reason != None or msg_split_incoming
+                    is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
+
+                    if start_next_msg or ready_to_edit or is_final_edit:
+                        embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
+                        embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
+                        if footer_text:
+                            embed.set_footer(text=footer_text)
+
+                        if start_next_msg:
+                            await reply_helper(embed=embed, silent=True)
+                        else:
+                            await asyncio.sleep(EDIT_DELAY_SECONDS - time_delta)
+                            await response_msgs[-1].edit(embed=embed)
+
+                        last_task_time = datetime.now().timestamp()
+
+            if use_plain_responses:
+                for content in response_contents:
+                    await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
+                    
             # Return assembled tool calls if the reason for finishing was a tool call
             if finish_reason == 'tool_calls':
                 return [
@@ -793,9 +810,6 @@ async def on_message(new_msg: discord.Message) -> None:
                     openai_kwargs['messages'] = conversation_history
                     final_stream = await openai_client.chat.completions.create(**openai_kwargs)
                     await stream_and_update(final_stream, executed_tools=executed_tool_calls)
-
-                if use_plain_responses:
-                    for content in response_contents: await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
 
         except Exception as e:
             raise e
