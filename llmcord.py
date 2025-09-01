@@ -16,8 +16,6 @@ import yaml
 import platform
 import urllib.parse
 from zoneinfo import ZoneInfo;
-import schedule
-from serpapi import GoogleSearch
 from collections import defaultdict
 import json
 import re
@@ -99,32 +97,43 @@ class MsgNode:
 
 
 async def perform_google_search(query: str) -> str:
-    """Performs a Google search using SerpApi and returns formatted results."""
+    """Performs a Google search using SerpApi with httpx and returns formatted results."""
+
     if not (api_key := config.get("serpapi_api_key")):
         return "Google Search is not configured with a SerpApi key."
-    try:
-        def search():
-            params = {"q": query, "api_key": api_key, "engine": "google"}
-            search_results = GoogleSearch(params).get_dict()
-            
-            snippets = []
-            if "answer_box" in search_results:
-                answer = search_results["answer_box"].get("answer") or search_results["answer_box"].get("snippet")
-                if answer:
-                    snippets.append({"answer": answer})
-            
-            if "organic_results" in search_results:
-                for result in search_results["organic_results"][:5]:
-                    snippet = {
-                        "title": result.get("title"),
-                        "link": result.get("link"),
-                        "snippet": result.get("snippet"),
-                    }
-                    snippets.append(snippet)
-            
-            return json.dumps(snippets) if snippets else "No results found."
 
-        return await asyncio.to_thread(search)
+    try:
+        params = {
+            "q": query,
+            "api_key": api_key,
+            "engine": "google",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get("https://serpapi.com/search", params=params)
+            response.raise_for_status()  # Raises an exception for 4XX/5XX status codes
+            search_results = response.json()
+
+        snippets = []
+        if "answer_box" in search_results:
+            answer = search_results["answer_box"].get("answer") or search_results["answer_box"].get("snippet")
+            if answer:
+                snippets.append({"answer": answer})
+
+        if "organic_results" in search_results:
+            for result in search_results.get("organic_results", [])[:5]:
+                snippet = {
+                    "title": result.get("title"),
+                    "link": result.get("link"),
+                    "snippet": result.get("snippet"),
+                }
+                snippets.append(snippet)
+
+        return json.dumps(snippets) if snippets else "No results found."
+
+    except httpx.HTTPStatusError as e:
+        logging.exception(f"HTTP error during Google search: {e}")
+        return f"An HTTP error occurred during search: {e}"
     except Exception as e:
         logging.exception(f"Error during Google search: {e}")
         return f"An error occurred during search: {e}"
@@ -840,13 +849,11 @@ async def on_message(new_msg: discord.Message) -> None:
         except Exception:
             logging.exception("Nested Error while generating exception warning")
 
-schedule.every(48).hours.do(lambda: asyncio.create_task(restart_discloud_app()))
-
 async def run_schedule_continuously():
     if config.get("discloud_token"):
         while True:
-            schedule.run_pending()
-            await asyncio.sleep(3600) 
+            await asyncio.sleep(48 * 60 * 60)
+            await restart_discloud_app()
 
 
 async def main() -> None:

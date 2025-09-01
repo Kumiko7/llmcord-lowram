@@ -2,5 +2,3 @@ discord.py>=2.6.0
 httpx
 openai
 pyyaml
-schedule
-google-search-results
