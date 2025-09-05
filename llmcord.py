@@ -598,6 +598,13 @@ async def on_message(new_msg: discord.Message) -> None:
         logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
 
         if system_prompt := config["system_prompt"]:
+            if not is_dm and new_msg.guild:
+                server_id = new_msg.guild.id
+                server_prompts = config.get("server_prompts", {})
+                # Use the server-specific prompt if its ID exists, otherwise fall back to the generic prompt
+                system_prompt = server_prompts.get(str(server_id), system_prompt)
+            
+            
             now = datetime.now().astimezone()
 
             system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
