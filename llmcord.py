@@ -1,13 +1,13 @@
 import asyncio
 from base64 import b64encode
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, time
 import logging
 from typing import Any, Literal, Optional
 
 import discord
 from discord.app_commands import Choice
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import LayoutView, TextDisplay
 import httpx
 from openai import AsyncOpenAI
@@ -448,7 +448,88 @@ async def on_ready() -> None:
         logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
 
     await discord_bot.tree.sync()
+    post_daily_news_summary.start()
 
+
+JAPAN_TIMEZONE = ZoneInfo("Asia/Tokyo")
+# The time to run the task
+SCHEDULED_TIME = time(hour=9, tzinfo=JAPAN_TIMEZONE)
+
+# --- Daily Task Definition ---
+
+@tasks.loop(time=SCHEDULED_TIME)
+async def post_daily_news_summary():
+    """Fetches, summarizes, and posts the latest Guardian article daily."""
+    guardian_api_key = config.get("guardian_api_key")
+    if not guardian_api_key:
+        logging.error("Guardian API key is not configured. Task cannot run.")
+        return
+    DESTINATION_CHANNEL_ID = config.get("botspam_id")
+
+    destination_channel = discord_bot.get_channel(DESTINATION_CHANNEL_ID)
+    if not destination_channel:
+        logging.error(f"Could not find destination channel with ID: {DESTINATION_CHANNEL_ID}")
+        return
+
+    try:
+        # Step 1: Fetch the latest article from The Guardian
+        today = datetime.date.today().strftime('%Y-%m-%d')
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://content.guardianapis.com/search",
+                params={
+                    "api-key": guardian_api_key,
+                    "order-by": "relevance",
+                    "show-editors-picks": "true",
+                    "page-size": 1,
+                    "from-date": today,
+                    "to-date": today,
+                    "show-fields": "body,headline"
+                }
+            )
+            response.raise_for_status()
+            article = response.json()["response"]["results"][0]
+        
+        # Step 2: Summarize the article with the LLM
+        provider_slash_model = curr_model
+        provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+        provider_config = config["providers"][provider]
+        base_url = provider_config["base_url"]
+        api_key = provider_config.get("api_key", "sk-no-key-required")
+        openai_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        messages = [{
+                "role": "user",
+                "content": f"Summarize the following news article and give your personal commentary on it:\n\n{clean_body}"
+            }]
+        if system_prompt := config["system_prompt"]:
+            now = datetime.now().astimezone()
+            system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
+            system_prompt = system_prompt.replace("{userid}", str(config["permissions"]["users"]["admin_ids"][0]))
+            now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Tokyo'))
+            system_prompt = system_prompt.replace("{date_jst}", now_jst.strftime("%B %d %Y")).replace("{time_jst}", now_jst.strftime("%H:%M:%S %Z%z"))
+            messages.append(dict(role="system", content=system_prompt))
+            
+        chat_completion = await openai_client.chat.completions.create(
+            messages=messages, model=model,
+        )
+        summary = chat_completion.choices[0].message.content
+
+        # Step 3: Send the summary to the Discord channel
+        embed = discord.Embed(
+            description=summary,
+        )
+        await destination_channel.send(embed=embed)
+
+    except Exception as e:
+        # Log any error that occurs during the process
+        logging.error(f"Failed to post daily news summary: {e}\n{traceback.format_exc()}")
+
+
+@post_daily_news_summary.before_loop
+async def before_daily_summary():
+    """Wait until the bot is ready before starting the task loop."""
+    await discord_bot.wait_until_ready()
 
 @discord_bot.event
 async def on_message(new_msg: discord.Message) -> None:
