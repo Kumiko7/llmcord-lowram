@@ -675,9 +675,9 @@ async def on_message(new_msg: discord.Message) -> None:
 
         conversation_history = messages[::-1]
         openai_kwargs = dict(model=model, messages=conversation_history, stream=True, extra_body=extra_body)
-        if tools:
-            openai_kwargs["tools"] = tools
-            openai_kwargs["tool_choice"] = "auto"
+        #if tools:
+        #    openai_kwargs["tools"] = tools
+        #    openai_kwargs["tool_choice"] = "auto"
         
         response_msgs, response_contents = [], []
         use_plain_responses = config.get("use_plain_responses", False)
