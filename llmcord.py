@@ -23,6 +23,8 @@ import contextlib
 import traceback
 import io
 
+from tool_manager import ToolManager
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +79,7 @@ activity = discord.CustomActivity(name=(config["status_message"] or "github.com/
 discord_bot = commands.Bot(intents=intents, activity=activity, command_prefix=None)
 
 httpx_client = httpx.AsyncClient()
+tool_manager = ToolManager(config, httpx_client)
 
 
 
@@ -94,275 +97,6 @@ class MsgNode:
     parent_msg: Optional[discord.Message] = None
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-async def perform_google_search(query: str) -> str:
-    """Performs a Google search using SerpApi with httpx and returns formatted results."""
-
-    if not (api_key := config.get("serpapi_api_key")):
-        return "Google Search is not configured with a SerpApi key."
-
-    try:
-        params = {
-            "q": query,
-            "api_key": api_key,
-            "engine": "google",
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get("https://serpapi.com/search", params=params)
-            response.raise_for_status()  # Raises an exception for 4XX/5XX status codes
-            search_results = response.json()
-
-        snippets = []
-        if "answer_box" in search_results:
-            answer = search_results["answer_box"].get("answer") or search_results["answer_box"].get("snippet")
-            if answer:
-                snippets.append({"answer": answer})
-
-        if "organic_results" in search_results:
-            for result in search_results.get("organic_results", [])[:5]:
-                snippet = {
-                    "title": result.get("title"),
-                    "link": result.get("link"),
-                    "snippet": result.get("snippet"),
-                }
-                snippets.append(snippet)
-
-        return json.dumps(snippets) if snippets else "No results found."
-
-    except httpx.HTTPStatusError as e:
-        logging.exception(f"HTTP error during Google search: {e}")
-        return f"An HTTP error occurred during search: {e}"
-    except Exception as e:
-        logging.exception(f"Error during Google search: {e}")
-        return f"An error occurred during search: {e}"
-        
-# --- VNDB TOOL IMPLEMENTATION (WITH STAFF PRIORITIZATION) ---
-async def search_vndb(query: str) -> str:
-    """Searches for a visual novel on VNDB and returns formatted results including staff and characters."""
-    try:
-        api_url = "https://api.vndb.org/kana/vn"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "filters": ["search", "=", query],
-            "fields": (
-                "id, title, alttitle, description, released, rating, votecount, image.url, "
-                "staff{role, name}, va{character{name}, staff{name}}"
-            ),
-            "sort": "searchrank",
-            "results": 3,
-        }
-        
-        response = await httpx_client.post(api_url, json=payload, timeout=10.0)
-        response.raise_for_status()
-        data = response.json()
-
-        if not data.get("results"):
-            return "No visual novels found for that query."
-
-        formatted_results = []
-        for vn in data["results"]:
-            description = vn.get('description', 'No description available.')
-            if description:
-                description = description.split('\n[spoiler]')[0]
-                description = "".join(filter(lambda c: c not in "[]", description))
-                if len(description) > 400:
-                    description = description[:400] + "..."
-
-            rating = f"{vn.get('rating', 0) / 10:.1f}/10" if vn.get('rating') else "Not rated"
-
-            result_str = (
-                f"ID: {vn.get('id')}\n"
-                f"Title: {vn.get('title')}\n"
-                f"Alternative Title: {vn.get('alttitle')}\n"
-                f"Release Date: {vn.get('released')}\n"
-                f"Rating: {rating} (from {vn.get('votecount', 0)} votes)\n"
-                f"Description: {description}\n"
-            )
-
-            # Process staff, grouping by role with prioritization
-            if staff_list := vn.get("staff"):
-                staff_by_role = defaultdict(list)
-                for member in staff_list:
-                    if name := member.get("name"):
-                        staff_by_role[member.get("role", "Unknown")].append(name)
-                
-                if staff_by_role:
-                    staff_str = "\nStaff:\n"
-                    
-                    # --- Prioritization Logic ---
-                    # Define priority roles. 'art' is the official role name for artist.
-                    priority_roles = ['scenario', 'art']
-                    all_roles = list(staff_by_role.keys())
-                    # Sort roles: priority roles come first, then the rest alphabetically
-                    all_roles.sort(key=lambda role: (role not in priority_roles, role))
-                    # --- End Prioritization Logic ---
-
-                    staff_count = 0
-                    limit = 10
-                    for role in all_roles:
-                        if staff_count >= limit:
-                            staff_str += "- ...and more.\n"
-                            break
-                        
-                        names = staff_by_role[role]
-                        role_str = f"- {role.replace('_', ' ').title()}: {', '.join(sorted(list(set(names)))[:3])}"
-                        if len(names) > 3:
-                            role_str += ", ..."
-                        staff_str += role_str + "\n"
-                        staff_count += len(names)
-                    result_str += staff_str
-
-            # Process characters and voice actors
-            if va_list := vn.get("va"):
-                char_limit = 8
-                char_list = [
-                    f"{va.get('character', {}).get('name', 'Unknown Char')} "
-                    f"(VA: {va.get('staff', {}).get('name', 'Unknown VA')})"
-                    for va in va_list
-                    if va.get('character', {}).get('name') and va.get('staff', {}).get('name')
-                ]
-                unique_chars = list(dict.fromkeys(char_list))
-                if unique_chars:
-                    result_str += "\nCharacters:\n- " + "\n- ".join(unique_chars[:char_limit])
-                    if len(unique_chars) > char_limit:
-                        result_str += "\n- ...and more."
-            
-            formatted_results.append(result_str)
-        
-        return "\n\n---\n\n".join(formatted_results)
-
-    except httpx.HTTPStatusError as e:
-        logging.exception(f"HTTP error during VNDB search: {e.response.status_code} - {e.response.text}")
-        return f"Error: Received status code {e.response.status_code} from VNDB API."
-    except Exception as e:
-        logging.exception(f"Error during VNDB search: {e}")
-        return f"An unexpected error occurred during the VNDB search: {e}"
-        
-# --- ANILIST TOOL IMPLEMENTATION ---
-async def search_anilist(query: str, media_type: str) -> str:
-    """Searches for anime or manga on AniList and returns formatted results."""
-    api_url = "https://graphql.anilist.co"
-    
-    graphql_query = """
-    query ($search: String, $type: MediaType) {
-      Media (search: $search, type: $type, sort: SEARCH_MATCH) {
-        id
-        title { romaji english }
-        description(asHtml: false)
-        format status episodes chapters volumes averageScore
-        genres
-        studios(isMain: true) { nodes { name } }
-        staff(sort: RELEVANCE, perPage: 4) { edges { role node { name { full } } } }
-        siteUrl
-        startDate { year month day }
-      }
-    }
-    """
-    variables = {"search": query, "type": media_type.upper()}
-
-    try:
-        response = await httpx_client.post(api_url, json={"query": graphql_query, "variables": variables}, timeout=10.0)
-        response.raise_for_status()
-        data = response.json()
-
-        media = data.get("data", {}).get("Media")
-        if not media:
-            return f"No {media_type.lower()} found for '{query}' on AniList."
-
-        description = media.get('description', 'No description available.')
-        if description:
-            description = re.sub(r'<br\s*/?>', '\n', description)
-            description = re.sub(r'<[^>]+>', '', description)
-            if len(description) > 400: description = description[:400] + "..."
-        
-        score = f"{media.get('averageScore')}/100" if media.get('averageScore') else "Not rated"
-
-        title_romaji = media.get('title', {}).get('romaji', 'N/A')
-        title_english = media.get('title', {}).get('english')
-        title_str = f"{title_romaji}" + (f" ({title_english})" if title_english and title_english != title_romaji else "")
-
-        details = [
-            f"Title: {title_str}",
-            f"Format: {str(media.get('format', 'N/A')).replace('_', ' ')}",
-            f"Status: {str(media.get('status', 'N/A')).replace('_', ' ')}",
-            f"Score: {score}",
-            f"Genres: {', '.join(media.get('genres', []))}",
-        ]
-        
-        start_date = media.get('startDate')
-        if start_date and all(start_date.values()):
-            try:
-                # Prioritising Japanese date format as requested
-                release_date_str = date(start_date['year'], start_date['month'], start_date['day']).strftime("%Y/%m/%d")
-                details.append(f"Release Date: {release_date_str}")
-            except ValueError:
-                details.append("Release Date: Invalid date")
-
-        if media_type == "ANIME":
-            if episodes := media.get('episodes'): details.append(f"Episodes: {episodes}")
-            if studios := media.get('studios', {}).get('nodes'): details.append(f"Studio: {', '.join([s['name'] for s in studios])}")
-        elif media_type == "MANGA":
-            if chapters := media.get('chapters'): details.append(f"Chapters: {chapters}")
-            if volumes := media.get('volumes'): details.append(f"Volumes: {volumes}")
-            if staff := media.get('staff', {}).get('edges'):
-                authors = [s['node']['name']['full'] for s in staff if s['role'] in ('Story & Art', 'Story')]
-                if authors: details.append(f"Author(s): {', '.join(authors)}")
-
-        details.extend([f"\nDescription:\n{description}", f"\nURL: {media.get('siteUrl')}"])
-        return "\n".join(details)
-
-    except httpx.HTTPStatusError as e:
-        logging.exception(f"HTTP error during AniList search: {e.response.status_code} - {e.response.text}")
-        return f"Error: Received status code {e.response.status_code} from AniList API."
-    except Exception as e:
-        logging.exception(f"Error during AniList search: {e}")
-        return f"An unexpected error occurred during the AniList search: {e}"
-        
-async def execute_python_code(code: str) -> str:
-    """Executes arbitrary Python code in a restricted environment and returns the output."""
-    # Clean up the code block from Markdown
-    if code.startswith("```python"):
-        code = code[9:]
-    elif code.startswith("```"):
-        code = code[3:]
-    if code.endswith("```"):
-        code = code[:-3]
-    code = code.strip()
-
-    if not code:
-        return "No code provided to execute."
-    
-    logging.info(f"Code Execution: {code}")
-
-    local_namespace = {}
-    stdout_capture = io.StringIO()
-    
-    # Define the synchronous execution part
-    def sync_exec():
-        with contextlib.redirect_stdout(stdout_capture):
-            exec(code, globals(), local_namespace)
-
-    try:
-        # Run the synchronous code in a separate thread with a timeout
-        await asyncio.wait_for(asyncio.to_thread(sync_exec), timeout=10.0)
-        
-        output = stdout_capture.getvalue()
-        # Truncate output to avoid Discord message limit
-        if len(output) > 1900:
-            output = "Output truncated:\n" + output[:1900] + "..."
-        
-        return f"Output:\n```\n{output or '[No output]'}\n```"
-
-    except asyncio.TimeoutError:
-        return "Error: Code execution timed out after 10 seconds."
-    except Exception:
-        # Capture and format the full exception traceback
-        error_trace = traceback.format_exc()
-        if len(error_trace) > 1900:
-            error_trace = "Error truncated:\n" + error_trace[:1900] + "..."
-        return f"An exception occurred:\n```\n{error_trace}\n```"
 
 async def restart_discloud_app():
     try:
@@ -618,66 +352,16 @@ async def on_message(new_msg: discord.Message) -> None:
             messages.append(dict(role="system", content=system_prompt))
 
         # --- Tool Definition ---
-        tools = []
-        if config.get("serpapi_api_key"):
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "google_search",
-                    "description": "Get information from the web for recent events or specific facts.",
-                    "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The search query to use."}}, "required": ["query"]},
-                },
-            })
-            
-        # Add the VNDB tool to the list of available tools
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "search_vndb",
-                "description": "Search for a visual novel (VN) on VNDB.org to get its title, description, rating, and other details.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string", "description": "The title or search term for the visual novel."}},
-                    "required": ["query"],
-                },
-            },
-        })
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "search_anilist",
-                "description": "Search for anime or manga on AniList to get details like description, score, status, episodes, etc.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The title of the anime or manga to search for."},
-                        "media_type": {"type": "string", "enum": ["ANIME", "MANGA"], "description": "The type of media to search for."}
-                    },
-                    "required": ["query", "media_type"],
-                },
-            },
-        })
+        tools = None
+        if ".tool" in new_msg.content:
+            tools = tool_manager.get_tool_definitions(user_is_admin)
         
-        if user_is_admin:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "execute_python_code",
-                    "description": "Executes arbitrary Python code. The code runs within an `exec()` statement. It can be used for calculations or quick tests. Use with caution.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"code": {"type": "string", "description": "The Python code to execute, often provided within a ```python ... ``` block."}},
-                        "required": ["code"],
-                    },
-                },
-            })
-
 
         conversation_history = messages[::-1]
         openai_kwargs = dict(model=model, messages=conversation_history, stream=True, extra_body=extra_body)
-        #if tools:
-        #    openai_kwargs["tools"] = tools
-        #    openai_kwargs["tool_choice"] = "auto"
+        if tools:
+           openai_kwargs["tools"] = tools
+           openai_kwargs["tool_choice"] = "auto"
         
         response_msgs, response_contents = [], []
         use_plain_responses = config.get("use_plain_responses", False)
@@ -774,58 +458,24 @@ async def on_message(new_msg: discord.Message) -> None:
 
         try:
             async with new_msg.channel.typing():
-                # --- First Streaming Attempt ---
-                stream = await openai_client.chat.completions.create(**openai_kwargs)
-                requested_tool_calls = await stream_and_update(stream)
-                executed_tool_calls = []
+                MAX_TOOL_ITERATIONS = 8
+                executed_tool_calls_display = []
 
-                # --- If Tool Calls Were Requested ---
-                if requested_tool_calls:
-                    
-                    
-                    tool_messages = []
-                    for tool_call in requested_tool_calls:
-                        func_name = tool_call["function"]["name"]
-                        try:
-                            args = tool_call["function"]["arguments"]
-                            args = json.loads(args)
-                            query = args.get("query", "")
-                            
-                            # Truncate query for display
-                            query_display = (query[:25] + '...') if len(query) > 25 else query
+                for _ in range(MAX_TOOL_ITERATIONS):
+                    stream = await openai_client.chat.completions.create(**openai_kwargs)
+                    requested_tool_calls = await stream_and_update(stream, executed_tools=executed_tool_calls_display)
 
-                            if func_name == "google_search":
-                                executed_tool_calls.append(f"🔎 Google: '{query_display}'")
-                                search_results = await perform_google_search(query)
-                            elif func_name == "search_vndb":
-                                executed_tool_calls.append(f"📚 VNDB: '{query_display}'")
-                                search_results = await search_vndb(query)
-                            elif func_name == "search_anilist":
-                                media_type = args.get("media_type", "ANIME")
-                                executed_tool_calls.append(f"💽 AniList/{media_type.title()}: '{query_display}'")
-                                search_results = await search_anilist(query, media_type)
-                            elif func_name == "execute_python_code":
-                                code = args.get("code", "")
-                                code_display = code
-                                executed_tool_calls.append(f"🐍 Python: \n'{code_display}'")
-                                search_results = await execute_python_code(code)
-                            else:
-                                search_results = "Unknown tool called."
+                    if not requested_tool_calls:
+                        break  # No more tools requested, this is the final response.
 
-                            tool_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "name": func_name, "content": search_results})
-                            
-                            conversation_history.append({"role": "assistant", "content": None, "tool_calls": requested_tool_calls})
-                            # Append tool results to history
-                            conversation_history.extend(tool_messages)
+                    tool_messages, new_display_messages = await tool_manager.handle_tool_calls(requested_tool_calls)
+                    executed_tool_calls_display.extend(new_display_messages)
 
-                        except json.JSONDecodeError:
-                            logging.exception(f"Failed to decode tool arguments. {tool_call}")
-                            executed_tool_calls.append(f"❌ Error using tool {func_name}'")
-                    
-                    # --- Second Streaming Attempt with Tool Results ---
+                    conversation_history.append({"role": "assistant", "content": None, "tool_calls": requested_tool_calls})
+                    conversation_history.extend(tool_messages)
                     openai_kwargs['messages'] = conversation_history
-                    final_stream = await openai_client.chat.completions.create(**openai_kwargs)
-                    await stream_and_update(final_stream, executed_tools=executed_tool_calls)
+                else:
+                    logging.warning(f"Exceeded max tool iterations ({MAX_TOOL_ITERATIONS}). Stopping.")
 
         except Exception as e:
             raise e
