@@ -156,7 +156,7 @@ class ToolManager:
             ),
             (
                 "character", 
-                "Query character entries. Note gender can be possibly null, 'm' or 'f'. Trait filter only takes a trait id and you can only query once per function call, so for character traits you should query the trait name first to get the id and then query the character.", 
+                "Query character entries. Note gender can be possibly null, 'm' or 'f'. Trait filter only takes a trait id and you can only query once per function call, so for character traits you should query the trait name first to get the id and then query the character, whereas for vn filters you can include the vn name search directly in a nested query", 
                 ["id", "name", "searchrank"],
                 [
                     "id", "search", "role", "blood_type", "sex", "sex_spoil", "gender", "gender_spoil", 
@@ -211,7 +211,7 @@ class ToolManager:
                 "A JSON string representing filter predicates. IMPORTANT: Filters that link to other entities ('vn', 'staff', 'character', 'producer', 'developer', 'release', 'seiyuu') MUST use a nested filter array for their value, while other filters MUST use a simple filter. "
                 "Example of a nested filter: '[\"vn\", \"=\", [\"id\", \"=\", \"v17\"]]'. "
                 "Example of a simple filter: '[\"search\", \"=\", \"Steins;Gate\"]'. "
-                "Example of a combined filter: '[\"and\", [\"vn\", \"=\", [\"id\", \"=\", \"v4028\"]], [\"trait\", \"=\", \"t345\"]]'. "
+                "Example of a combined filter: '[\"and\", [\"vn\", \"=\", [\"search\", \"=\", \"aokana\"]], [\"trait\", \"=\", \"t345\"]]'. "
                 f"Valid filter names: {', '.join(filter_options)}."
             )
             params["fields"]["description"] = (
