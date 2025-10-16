@@ -118,7 +118,7 @@ class ToolManager:
         vndb_endpoints = [
             (
                 "vn", 
-                "Query visual novel entries. Example filter: [\"and\", [\"staff\", \"=\", [\"search\", \"=\", \"Watanabe Ryouichi\"]], [\"search\", \"=\", \"aokana\"], [\"has_anime\", \"=\", 1]]", 
+                "Query visual novel entries. Example filter: ['and', ['staff', '=', ['search', '=', 'Watanabe Ryouichi']], ['search', '=', 'aokana'], ['has_anime', '=', 1]]", 
                 ["id", "title", "released", "rating", "votecount", "searchrank"],
                 [
                     "id", "search", "lang", "olang", "platform", "length", "released", "rating", "votecount", 
@@ -156,7 +156,7 @@ class ToolManager:
             ),
             (
                 "character", 
-                "Query character entries. Trait filter only takes a trait id and you can only query once per function call, so for character traits you should query the trait name first to get the id and then query the character, whereas for vn filters you can include the vn name search directly in a nested query. Example filter: [\"and\", [\"vn\", \"=\", [\"search\", \"=\", \"aokana\"]], [\"trait\", \"=\", \"i8\"], [\"gender\", \"=\", \"f\"]]", 
+                "Query character entries. Trait filter only takes a trait id and you can only query once per function call, so for character traits you should query the trait name first to get the id and then query the character, whereas for vn filters you can include the vn name search directly in a nested query. Example filter: ['and', ['vn', '=', ['search', '=', 'aokana']], ['trait', '=', 'i8'], ['gender', '=', 'f']]", 
                 ["id", "name", "searchrank"],
                 [
                     "id", "search", "role", "blood_type", "sex", "sex_spoil", "gender", "gender_spoil", 
@@ -184,7 +184,7 @@ class ToolManager:
             ),
             (
                 "trait", 
-                "Query character trait entries (e.g., 'Blond', 'Younger Sister') For 'pink hair', just search for 'pink'. For 'blue eyes', just search for 'blue'. Example filter: [\"search\", \"=\", \"pink\"]", 
+                "Query character trait entries (e.g., 'Blond', 'Younger Sister') For 'pink hair', just search for 'pink'. For 'blue eyes', just search for 'blue'. Example filter: ['search', '=', 'pink']", 
                 ["id", "name", "char_count", "searchrank"],
                 ["id", "search"],
                 [
