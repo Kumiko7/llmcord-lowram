@@ -367,9 +367,7 @@ class ToolManager:
                 payload[key] = kwargs[key]
         
         # Ensure results are within API limits
-        if isinstance(payload["results"], str):
-            payload["results"] = int(payload["results"])
-        payload["results"] = min(payload.get("results", 10), 100)
+        payload["results"] = min(int(payload.get("results", 10)), 100)
 
         try:
             response = await self.client.post(api_url, json=payload, timeout=15.0)
