@@ -288,7 +288,7 @@ class ToolManager:
                     filters_str = args.get("filters", "")
                     # Try to find a 'search' query in filters for a better display name
                     search_match = re.search(r'\["search",\s*"=",\s*"([^"]+)"\]', filters_str)
-                    query_display = search_match.group(1) if search_match else "Advanced Filter"
+                    query_display = search_match.group(1) if search_match else filters_str
                     display = f"📚 VNDB/{endpoint}: '{query_display}'"
                     result = await func(**args)
                 elif func_name == "google_search":
