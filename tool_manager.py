@@ -123,7 +123,7 @@ class ToolManager:
                 [
                     "id", "search", "lang", "olang", "platform", "length", "released", "rating", "votecount", 
                     "has_description", "has_anime", "has_screenshot", "has_review", "devstatus", "tag", 
-                    "dtag", "anime_id", "label", "release", "character", "staff", "developer", "Basic example filter: '[\"search\", \"=\", \"Steins;Gate\"]'. Complex example filter for a vn called 'aokana', worked on by 'Watanabe Ryouichi', with an anime: '[\"and\", [\"staff\", \"=\", [\"search\", \"=\", \"Watanabe Ryouichi\"]], [\"search\", \"=\", \"aokana\"], [\"has_anime\", \"=\", 1]]'"
+                    "dtag", "anime_id", "label", "release", "character", "staff", "developer", "Basic example filter searching for the VN Steins;Gate: '[\"search\", \"=\", \"Steins;Gate\"]'. Complex example filter for a vn called 'aokana', made by 'sprite', with an anime: '[\"and\", [\"developer\", \"=\", [\"search\", \"=\", \"sprite\"]], [\"search\", \"=\", \"aokana\"], [\"has_anime\", \"=\", 1]]'. Complex example filter for a vn written by 'Watanabe Ryouichi' with the 'Science Fiction' tag: [\"and\",[\"staff\",\"=\",[\"search\",\"=\",\"Watanabe Ryouichi\"]],[\"tag\",\"=\",\"g105\"]]"
                 ],
                 [
                     "id", "title", "alttitle", "titles", "aliases", "olang", "devstatus", "released", 

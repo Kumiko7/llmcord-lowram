@@ -476,6 +476,8 @@ async def on_message(new_msg: discord.Message) -> None:
                     openai_kwargs['messages'] = conversation_history
                 else:
                     logging.warning(f"Exceeded max tool iterations ({MAX_TOOL_ITERATIONS}). Stopping.")
+                    content = f"⚠️ Exceeded Max Tool Iterations ({MAX_TOOL_ITERATIONS})"
+                    response_msg = await new_msg.reply(content=content, suppress_embeds=True)
 
         except Exception as e:
             raise e
