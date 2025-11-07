@@ -212,7 +212,7 @@ class ToolManager:
                 f"Valid filter names: {', '.join(filter_options)}."
             )
             params["fields"]["description"] = (
-                "A comma-separated list of fields to fetch, e.g., 'title,rating,image.url'. "
+                "A comma-separated list of fields to fetch, e.g., 'title,rating,image.url'. Plural object fields such as developers, vns, tags, traits MUST specify a subfield, e.g. 'vns.title,developers.name' "
                 f"Valid fields: {', '.join(field_options)}."
             )
             
